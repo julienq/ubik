@@ -1,0 +1,5 @@
+*.swp
+server/dump.rdb
+server/node_modules
+server/redis-7007.log
+server/redis-7007.pid
