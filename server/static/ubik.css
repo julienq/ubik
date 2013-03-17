@@ -2,7 +2,35 @@ body {
   font-family: Univers, "Helvetica Neue", Helvetica, sans-serif;
 }
 
+a {
+  text-decoration: none;
+  color: #7ab317;
+}
+
 h1 {
   color: #7ab317;
   font-family: CooperBlackStd;
+}
+
+.user-info img {
+  max-height: 144px;
+  max-width: 144px;
+}
+
+.uid {
+  font-weight: bold;
+}
+
+.user-info .following, .user-info .followers {
+  list-style-type: none;
+}
+
+.user-info .following li, .user-info .followers li {
+  display: inline;
+}
+
+.status .date {
+  font-size: smaller;
+  font-style: italic;
+  color: #888;
 }
