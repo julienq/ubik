@@ -1,11 +1,44 @@
 "use strict";
 
-var port = 7000;
-var port_redis = 7007;
+// TODO: add remote -> give each remote an id (from count) for all info from
+// that remote; local is 0
 
 var flexo = require("../flexo.js");
 var express = require("express");
-var redis = require("redis").createClient(port_redis);
+
+// Parse arguments from the command line
+function parse_args(argv) {
+  var m;
+  var args = { port: 7000, port_redis: 7007 };
+  argv.forEach(function (arg) {
+    if (m = arg.match(/^-?-?port=(\d+)/i)) {
+      args.port = parseInt(m[1], 10);
+    } else if (m = arg.match(/^-?-?redis=(\d+)/i)) {
+      args.port_redis = parseInt(m[1], 10);
+    } else if (arg.match(/^-?-?h(elp)?$/i)) {
+      args.help = true;
+    }
+  });
+  return args;
+}
+
+// Show help info and quit
+function show_help(node, name) {
+  console.log("\nUsage: %0 %1 [options]\n\nOptions:".fmt(node, name));
+  console.log("  help: show this help message");
+  console.log("  port=<port number>: port number for the server");
+  console.log("  redis=<port number>: port number for the Redis server");
+  console.log("");
+  process.exit(0);
+}
+
+var argv = process.argv.slice(2);
+var args = parse_args(argv);
+if (args.help) {
+  show_help.apply(null, process.argv);
+}
+
+var redis = require("redis").createClient(args.port_redis);
 
 function html(params, head, body) {
   if (head == null) {
@@ -41,6 +74,12 @@ function check_uid(uid, next, notfound, found) {
   });
 }
 
+function error_page(res, status, body) {
+  res.send(status, html({ title: "Ubik | Error %0".fmt(status) },
+      flexo.$link({ rel: "stylesheet", href: "/static/ubik.css" }),
+      flexo.$h1("UBIK") + body));
+}
+
 // Zip results of ZRANGE with scores, returning a list of (value, score) pairs
 function ziprange(range) {
   for (var i = 0, z = [], n = range.length - 1; i < n; i += 2) {
@@ -61,6 +100,7 @@ app.use("/static", express.static(__dirname + "/static"));
 app.put("/user/:uid", function (req, res, next) {
   var m = redis.multi();
   m.SADD("users", req.params.uid);
+  m.SADD("remotes:users:%0".fmt(req.params.uid), "");
   var key = "user:%0".fmt(req.params.uid);
   m.HSET(key, "uid", req.params.uid);
   ["first", "last", "avatar"].forEach(function (param) {
@@ -106,22 +146,77 @@ app.put("/user/:uid/status", function (req, res, next) {
   });
 });
 
-// Follow someone
-app.put("/user/:srcid/follow/:destid", function (req, res, next) {
-  check_uid(req.params.srcid, next, next, function (srcid) {
-    check_uid(req.params.destid, next, next, function (destid) {
-      var now = Date.now();
-      redis.multi()
-        .ZADD("user:%0:following".fmt(srcid), now, destid)
-        .ZADD("user:%0:followers".fmt(destid), now, srcid)
-        .exec(function (err) {
+// Get status updates from the user
+app.get("/user/:uid/status", function (req, res, next) {
+  check_uid(req.params.uid, next, next, function (uid) {
+    redis.ZRANGE("user:%0:status".fmt(uid), 0, -1, function (err, range) {
+      if (err) {
+        next(err)
+      } else {
+        var m = redis.multi();
+        range.forEach(function (id) {
+          m.HGETALL("status:%0".fmt(id));
+        });
+        m.exec(function (err, replies) {
           if (err) {
             next(err);
           } else {
-            res.send(201);
+            res.json(replies);
           }
         });
+      }
     });
+  });
+});
+
+// Follow someone: srcid starts following destid
+// curl -X PUT -d '{"srcid":<srcid>,"remote":<remote>}'
+//   -H "Content-type: application/json"
+//   http://127.0.0.1:7000/followers/<destid>
+// TODO don't do anything if srcid already follows destid
+// TODO include a token from remote requests?
+app.put("/user/:destid/followers", function (req, res, next) {
+  if (req.body.remote) {
+    // srcid is a remote user
+    http.get(path.join(req.body.remote, "/user/%0/info".fmt(req.body.srcid)),
+      function (response) {
+        if (response.statusCode === 200) {
+          var ruser = JSON.parse(response.responseText);
+          ruser.remote = req.body.remote;
+          // m.SADD("remotes:users:%0".fmt(req.body.srcid), remote);
+        } else {
+          next("Got response %0".fmt(response.statusCode));
+        }
+      }).on("error", next);
+  } else {
+    // Two local users
+    check_uid(req.body.srcid, next, next, function (srcid) {
+      check_uid(req.params.destid, next, next, function (destid) {
+        var now = Date.now();
+        redis.multi()
+          .ZADD("user:%0:following".fmt(srcid), now, destid)
+          .ZADD("user:%0:followers".fmt(destid), now, srcid)
+          .exec(function (err) {
+            if (err) {
+              next(err);
+            } else {
+              res.send(201);
+            }
+          });
+      });
+    });
+  }
+});
+
+app.get("/user/:uid/info", function (req, res, next) {
+  redis.HGETALL("user:%0".fmt(req.params.uid), function (err, reply) {
+    if (err) {
+      next(err);
+    } else if (!reply) {
+      error_page(res, 404, flexo.$p("User %0 not found".fmt(req.params.uid)));
+    } else {
+      res.json(reply);
+    }
   });
 });
 
@@ -134,7 +229,7 @@ app.get("/user/:uid", function (req, res, next) {
     if (err) {
       next(err);
     } else if (!replies[0]) {
-      res.send(404);
+      error_page(res, 404, flexo.$p("User %0 not found".fmt(req.params.uid)));
     } else {
       var uid = replies[0].uid;
       var user = "%0 %1".fmt(replies[0].first, replies[0].last);
@@ -195,8 +290,8 @@ app.get("/user/:uid", function (req, res, next) {
 
 // Error handling
 app.use(function (err, req, res, next) {
-  res.send(500, err.toString());
+  res.send(500, err.toString())
 });
 
-app.listen(port);
-console.log("HTTP server on port %0".fmt(port));
+app.listen(args.port);
+console.log("HTTP server on port %0".fmt(args.port));
