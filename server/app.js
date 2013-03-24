@@ -3,6 +3,8 @@
 // TODO: add remote -> give each remote an id (from count) for all info from
 // that remote; local is 0
 
+var fs = require("fs");
+var path = require("path");
 var flexo = require("../flexo.js");
 var express = require("express");
 
@@ -40,82 +42,50 @@ if (args.help) {
 
 var redis = require("redis").createClient(args.port_redis);
 
-function html(params, head, body) {
-  if (head == null) {
-    head = "";
+function get_script(name, k) {
+  if (get_script[name]) {
+    k(undefined, get_script[name]);
   }
-  if (!params.DOCTYPE) {
-    params.DOCTYPE = "<!DOCTYPE html>";
-  }
-  if (!params.title) {
-    params.title = "Untilted";
-  }
-  if (!params.charset) {
-    params.charset = "UTF-8";
-  }
-  return params.DOCTYPE + "\n" +
-    flexo.$html({ lang: params.lang },
-      flexo.$head(
-        flexo.$title(params.title),
-        flexo.$meta({ charset: params.charset }, true),
-        head),
-      flexo.$body(body));
-}
-
-function check_uid(uid, next, notfound, found) {
-  redis.SISMEMBER("users", uid, function (err, reply) {
+  fs.readFile(path.join("scripts", name + ".lua"), function (err, data) {
     if (err) {
-      next(err);
-    } else if (reply === 0) {
-      notfound("No user %0".fmt(uid));
+      k(err);
     } else {
-      found(uid);
+      get_script[name] = data;
+      k(undefined, data);
     }
   });
-}
-
-function error_page(res, status, body) {
-  res.send(status, html({ title: "Ubik | Error %0".fmt(status) },
-      flexo.$link({ rel: "stylesheet", href: "/static/ubik.css" }),
-      flexo.$h1("UBIK") + body));
-}
-
-// Zip results of ZRANGE with scores, returning a list of (value, score) pairs
-function ziprange(range) {
-  for (var i = 0, z = [], n = range.length - 1; i < n; i += 2) {
-    z.push([range[i], range[i + 1]]);
-  }
-  return z;
 }
 
 var app = express();
 
 app.use(express.bodyParser());
-app.use("/static", express.static(__dirname + "/static"));
-
 
 // Add a new user:
 // curl -X PUT -d '{"first":...,"last":...}' -H "Content-type: application/json"
 //   http://127.0.0.1:7000/user/<uid>
 app.put("/user/:uid", function (req, res, next) {
-  var m = redis.multi();
-  m.SADD("users", req.params.uid);
-  m.SADD("remotes:users:%0".fmt(req.params.uid), "");
-  var key = "user:%0".fmt(req.params.uid);
-  m.HSET(key, "uid", req.params.uid);
-  ["first", "last", "avatar"].forEach(function (param) {
-    if (req.body[param]) {
-      m.HSET(key, param, req.body[param]);
-    }
-  });
-  m.exec(function (err) {
+  get_script("add-user", function (err, script) {
     if (err) {
       next(err);
     } else {
-      res.send(201);
+      var args = [script, 0, req.params.uid];
+      for (var k in req.body) {
+        args.push(k);
+        args.push(req.body[k]);
+      }
+      args.push(function (err, reply) {
+        if (err) {
+          next(err);
+        } else {
+          res.send(201);
+        }
+      });
+      redis.EVAL.apply(redis, args);
     }
   });
 });
+
+/*
 
 // Status update
 // curl -X PUT -d '{"msg":...}' -H "Content-type: application/json"
@@ -288,9 +258,11 @@ app.get("/user/:uid", function (req, res, next) {
   });
 });
 
+*/
+
 // Error handling
 app.use(function (err, req, res, next) {
-  res.send(500, err.toString())
+  res.send(500, err);
 });
 
 app.listen(args.port);
