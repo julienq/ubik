@@ -42,6 +42,9 @@ if (args.help) {
 
 var redis = require("redis").createClient(args.port_redis);
 
+// Load a Lua script from the scripts directory and return its hash so that it
+// can be called with EVALSHA.
+// TODO function to run the script directly
 function get_script(name, k) {
   if (get_script[name]) {
     k(undefined, get_script[name]);
@@ -62,6 +65,8 @@ function get_script(name, k) {
   });
 }
 
+
+// TODO wait for redis connection to start the server
 var app = express();
 
 app.use(express.bodyParser());
@@ -91,7 +96,6 @@ app.put("/user/:uid", function (req, res, next) {
   });
 });
 
-
 // Status update
 app.put("/user/:uid/status", function (req, res, next) {
   get_script("status-update", function (err, script) {
@@ -108,6 +112,30 @@ app.put("/user/:uid/status", function (req, res, next) {
         });
     }
   });
+});
+
+// Local user starts following another (possibly remote) user given by an id in
+// the body of the request
+app.put("/user/:uid/following", function (req, res, next) {
+  if (req.body.remote) {
+    // TODO following a remote user
+    res.send(501);
+  } else {
+    get_script("follow-local", function (err, script) {
+      if (err) {
+        next(err);
+      } else {
+        redis.EVALSHA(script, 0, req.params.uid, req.body.fid,
+          req.body.date || Date.now(), function (err, reply) {
+            if (err) {
+              next(err);
+            } else {
+              res.send(201);
+            }
+          });
+      }
+    });
+  }
 });
 
 /*
