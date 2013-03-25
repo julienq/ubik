@@ -50,8 +50,14 @@ function get_script(name, k) {
     if (err) {
       k(err);
     } else {
-      get_script[name] = data;
-      k(undefined, data);
+      redis.send_command("SCRIPT", ["LOAD", data], function (err, reply) {
+        if (err) {
+          k(err);
+        } else {
+          get_script[name] = reply;
+          k(undefined, reply);
+        }
+      });
     }
   });
 }
@@ -80,64 +86,31 @@ app.put("/user/:uid", function (req, res, next) {
           res.send(201);
         }
       });
-      redis.EVAL.apply(redis, args);
+      redis.EVALSHA.apply(redis, args);
     }
   });
 });
 
-/*
 
 // Status update
-// curl -X PUT -d '{"msg":...}' -H "Content-type: application/json"
-//   http://127.0.0.1:7000/user/<uid>/status
 app.put("/user/:uid/status", function (req, res, next) {
-  check_uid(req.params.uid, next, next, function (uid) {
-    var date = req.body.date || Date.now();
-    redis.INCR("counter", function (err, reply) {
-      if (err) {
-        next(err);
-      } else {
-        var id = reply.toString(36);
-        redis.multi()
-          .ZADD("user:%0:status".fmt(uid), date, id)
-          .HSET("status:%0".fmt(id), "id", id)
-          .HSET("status:%0".fmt(id), "date", date)
-          .HSET("status:%0".fmt(id), "from", uid)
-          .HSET("status:%0".fmt(id), "msg", req.body.msg)
-        .exec(function (err) {
+  get_script("status-update", function (err, script) {
+    if (err) {
+      next(err);
+    } else {
+      redis.EVALSHA(script, 0, req.params.uid,
+        req.body.date || Date.now(), req.body.body, function (err, reply) {
           if (err) {
             next(err);
           } else {
             res.send(201);
           }
         });
-      }
-    });
+    }
   });
 });
 
-// Get status updates from the user
-app.get("/user/:uid/status", function (req, res, next) {
-  check_uid(req.params.uid, next, next, function (uid) {
-    redis.ZRANGE("user:%0:status".fmt(uid), 0, -1, function (err, range) {
-      if (err) {
-        next(err)
-      } else {
-        var m = redis.multi();
-        range.forEach(function (id) {
-          m.HGETALL("status:%0".fmt(id));
-        });
-        m.exec(function (err, replies) {
-          if (err) {
-            next(err);
-          } else {
-            res.json(replies);
-          }
-        });
-      }
-    });
-  });
-});
+/*
 
 // Follow someone: srcid starts following destid
 // curl -X PUT -d '{"srcid":<srcid>,"remote":<remote>}'
@@ -262,7 +235,7 @@ app.get("/user/:uid", function (req, res, next) {
 
 // Error handling
 app.use(function (err, req, res, next) {
-  res.send(500, err);
+  res.send(500, err.toString());
 });
 
 app.listen(args.port);
