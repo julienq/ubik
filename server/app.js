@@ -48,21 +48,54 @@ var redis = require("redis").createClient(args.port_redis);
 function get_script(name, k) {
   if (get_script[name]) {
     k(undefined, get_script[name]);
+  } else {
+    fs.readFile(path.join("scripts", name + ".lua"), function (err, data) {
+      if (err) {
+        k(err);
+      } else {
+        redis.send_command("SCRIPT", ["LOAD", data], function (err, reply) {
+          if (err) {
+            k(err);
+          } else {
+            get_script[name] = reply;
+            k(undefined, reply);
+          }
+        });
+      }
+    });
   }
-  fs.readFile(path.join("scripts", name + ".lua"), function (err, data) {
+}
+
+// Run a script with the given args, then call done with the reply. next is
+// required to handle errors
+function run_script(name, args, next, done) {
+  get_script(name, function (err, script) {
     if (err) {
-      k(err);
+      next(err);
     } else {
-      redis.send_command("SCRIPT", ["LOAD", data], function (err, reply) {
+      args.unshift(script);
+      args.push(function (err, reply) {
         if (err) {
-          k(err);
+          next(err);
         } else {
-          get_script[name] = reply;
-          k(undefined, reply);
+          done(reply);
         }
       });
+      redis.EVALSHA.apply(redis, args);
     }
   });
+}
+
+// Zip a HGETALL reply into a regular object
+function zip_hgetall(reply) {
+  if (Array.isArray(reply) && reply.length % 2 === 0) {
+    var h = {};
+    for (var i = 0, n = reply.length; i < n; i += 2) {
+      h[reply[i]] = reply[i + 1];
+    }
+    return h;
+  }
+  return reply;
 }
 
 
@@ -75,43 +108,29 @@ app.use(express.bodyParser());
 // curl -X PUT -d '{"first":...,"last":...}' -H "Content-type: application/json"
 //   http://127.0.0.1:7000/user/<uid>
 app.put("/user/:uid", function (req, res, next) {
-  get_script("add-user", function (err, script) {
-    if (err) {
-      next(err);
-    } else {
-      var args = [script, 0, req.params.uid];
-      for (var k in req.body) {
-        args.push(k);
-        args.push(req.body[k]);
-      }
-      args.push(function (err, reply) {
-        if (err) {
-          next(err);
-        } else {
-          res.send(201);
-        }
-      });
-      redis.EVALSHA.apply(redis, args);
-    }
+  var args = [0, req.params.uid];
+  for (var k in req.body) {
+    args.push(k);
+    args.push(req.body[k]);
+  }
+  run_script("add-user", args, next, function (reply) {
+    res.send(201);
   });
 });
 
-// Status update
-app.put("/user/:uid/status", function (req, res, next) {
-  get_script("status-update", function (err, script) {
-    if (err) {
-      next(err);
-    } else {
-      redis.EVALSHA(script, 0, req.params.uid,
-        req.body.date || Date.now(), req.body.body, function (err, reply) {
-          if (err) {
-            next(err);
-          } else {
-            res.send(201);
-          }
-        });
-    }
+// Get the public info for a user, TODO: status updates
+app.get("/user/:uid", function (req, res, next) {
+  run_script("user-info", [0, req.params.uid], next, function (reply) {
+    res.send(hzip(reply));
   });
+});
+
+// Make a new status update
+app.put("/user/:uid/status", function (req, res, next) {
+  run_script("status-update", [0, req.params.uid, req.body.date || Date.now(),
+    req.body.body], next, function (reply) {
+      res.send(201);
+    });
 });
 
 // Local user starts following another (possibly remote) user given by an id in
@@ -139,57 +158,6 @@ app.put("/user/:uid/following", function (req, res, next) {
 });
 
 /*
-
-// Follow someone: srcid starts following destid
-// curl -X PUT -d '{"srcid":<srcid>,"remote":<remote>}'
-//   -H "Content-type: application/json"
-//   http://127.0.0.1:7000/followers/<destid>
-// TODO don't do anything if srcid already follows destid
-// TODO include a token from remote requests?
-app.put("/user/:destid/followers", function (req, res, next) {
-  if (req.body.remote) {
-    // srcid is a remote user
-    http.get(path.join(req.body.remote, "/user/%0/info".fmt(req.body.srcid)),
-      function (response) {
-        if (response.statusCode === 200) {
-          var ruser = JSON.parse(response.responseText);
-          ruser.remote = req.body.remote;
-          // m.SADD("remotes:users:%0".fmt(req.body.srcid), remote);
-        } else {
-          next("Got response %0".fmt(response.statusCode));
-        }
-      }).on("error", next);
-  } else {
-    // Two local users
-    check_uid(req.body.srcid, next, next, function (srcid) {
-      check_uid(req.params.destid, next, next, function (destid) {
-        var now = Date.now();
-        redis.multi()
-          .ZADD("user:%0:following".fmt(srcid), now, destid)
-          .ZADD("user:%0:followers".fmt(destid), now, srcid)
-          .exec(function (err) {
-            if (err) {
-              next(err);
-            } else {
-              res.send(201);
-            }
-          });
-      });
-    });
-  }
-});
-
-app.get("/user/:uid/info", function (req, res, next) {
-  redis.HGETALL("user:%0".fmt(req.params.uid), function (err, reply) {
-    if (err) {
-      next(err);
-    } else if (!reply) {
-      error_page(res, 404, flexo.$p("User %0 not found".fmt(req.params.uid)));
-    } else {
-      res.json(reply);
-    }
-  });
-});
 
 app.get("/user/:uid", function (req, res, next) {
   redis.multi()
