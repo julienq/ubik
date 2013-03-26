@@ -5,7 +5,7 @@
 
 var fs = require("fs");
 var path = require("path");
-var flexo = require("../flexo.js");
+var flexo = require("flexo");
 var express = require("express");
 
 // Parse arguments from the command line
@@ -121,7 +121,7 @@ app.put("/user/:uid", function (req, res, next) {
 // Get the public info for a user, TODO: status updates
 app.get("/user/:uid", function (req, res, next) {
   run_script("user-info", [0, req.params.uid], next, function (reply) {
-    res.send(hzip(reply));
+    res.send(zip_hgetall(reply));
   });
 });
 
